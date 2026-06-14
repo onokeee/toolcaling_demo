@@ -1,0 +1,7 @@
+streamlit>=1.36
+openai>=1.40
+pandas>=2.0
+plotly>=5.20
+APScheduler>=3.10
+python-dotenv>=1.0
+tzdata>=2024.1

@@ -1,0 +1,14 @@
+# 秘密情報（実APIキーを含むため絶対にコミットしない）
+.env
+.streamlit/secrets.toml
+
+# Python キャッシュ
+__pycache__/
+*.pyc
+
+# SQLite の一時ファイル（本体 data/factory.db のみコミットする）
+*.db-wal
+*.db-shm
+
+# data/ 配下のサンプル(factory.db, shared/*.csv)はコミット対象。
+# 本番運用で実データを置く場合は、必要に応じて data/ を ignore してください。

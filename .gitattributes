@@ -1,0 +1,3 @@
+# テキストは自動正規化（リポジトリ内はLF）。SQLite DBはバイナリ扱い。
+* text=auto
+*.db binary
