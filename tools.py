@@ -1,9 +1,10 @@
 """LLM(OpenAI互換 function calling)に渡すツール定義と実行ロジック。
 
-ツールは3つ:
-  - run_sql_query : SELECT文を実行して結果テーブルを返す
-  - plot_chart    : SELECT結果をグラフ化する
-  - get_schema    : スキーマ情報を返す
+ツールは4つ:
+  - run_sql_query  : SELECT文を実行して結果テーブルを返す
+  - plot_chart     : SELECT結果を単軸グラフ(棒/折れ線/円/面/散布)にする
+  - plot_dual_axis : 棒(左軸)+折れ線(右軸)の2軸グラフにする
+  - get_schema     : スキーマ情報を返す
 
 dispatch() の戻り値:
   {

@@ -141,6 +141,205 @@ python scheduler.py
 - 新しい返答が来ると、チャットは自動で最下部までスクロールします。
 - `.env` 未設定でも、データ生成・SQLガードの動作確認やサンプル質問ボタンの表示までは可能です（回答生成にはLLM設定が必要）。
 
+## Tool群と Function Calling の仕組み
+
+LLM自身はDBに触れません。代わりに **「呼び出せる関数(ツール)の一覧」を JSON Schema として毎回LLMに渡し**、
+LLMが「どのツールを・どんな引数で呼ぶか」を決め、アプリ側が実際に実行して結果を返す——
+これが **Function Calling (tool calling)** です。実装は [tools.py](tools.py) / [llm.py](llm.py) / [app.py](app.py) に分かれています。
+
+### 全体のやりとり（1質問の内部シーケンス）
+
+```
+1. アプリ → API : messages(system+履歴) + tools(関数定義) + tool_choice="auto"
+2. API   → アプリ: assistant メッセージ
+                    ├─ tool_calls 無し → それが最終回答
+                    └─ tool_calls 有り → {name, arguments(JSON文字列)}
+3. アプリ        : arguments を parse して該当関数を実行 (tools.dispatch)
+                   ・SQL系は db.run_select() で SELECT のみ実行
+                   ・結果を要約した JSON を作る
+4. アプリ → API : 同じ messages に assistant(tool_calls) と
+                    {"role":"tool","tool_call_id":..,"content":結果JSON} を追加して再送
+5. API   → アプリ: 結果を踏まえた最終回答(自然言語)
+   ※ 2〜4 は必要なだけ繰り返す（最大 MAX_AGENT_STEPS=6 回）
+```
+
+対応するコード:
+- ツール定義: `tools.TOOLS`（[tools.py](tools.py)）
+- API呼び出し: `llm.chat()` が `tools=TOOLS, tool_choice="auto"` で送信（[llm.py](llm.py)）
+- tool_calls の取り出し・実行: `app._extract_calls` → `app._execute_calls` → `tools.dispatch`（[app.py](app.py)）
+
+### 用意されているTool（4種）
+
+| ツール名 | 役割 | 必須パラメータ |
+|---|---|---|
+| `run_sql_query` | SELECTを実行し結果テーブルを取得 | `sql`, `purpose` |
+| `plot_chart` | SELECT結果を単軸グラフ化(棒/折れ線/円/面/散布) | `sql`, `chart_type`, `x`, `y`, `title` |
+| `plot_dual_axis` | 棒(左軸)+折れ線(右軸)の2軸グラフ | `sql`, `x`, `bar_y`, `line_y`, `title` |
+| `get_schema` | テーブル構成・建屋/ステータス種別・日付範囲を取得 | （なし） |
+
+> SQLを受け取るツール(`run_sql_query` / `plot_chart` / `plot_dual_axis`)は、いずれも実行時に
+> `db.run_select()` を通すため **SELECT以外は実行されません**（後述の「安全設計」参照）。
+
+### Tool定義の実体（LLMに渡す JSON Schema）
+
+`run_sql_query` の例（`tools.TOOLS` の1要素）:
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "run_sql_query",
+    "description": "SQLite DB に対して読み取り専用の SELECT 文を実行し、結果テーブルを取得する。…",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "sql":     {"type": "string", "description": "実行する SQLite 用 SELECT 文。SELECT または WITH で始めること。"},
+        "purpose": {"type": "string", "description": "このクエリで何を確認したいかの短い説明(日本語)。"}
+      },
+      "required": ["sql", "purpose"]
+    }
+  }
+}
+```
+
+`description` と各パラメータの説明文が、LLMが正しいSQL・引数を作るためのヒントになります。
+
+### 各Toolの実例
+
+#### ① run_sql_query — 「現在DOWNしている装置を一覧で出して」
+
+LLMが返す tool_call の `arguments`（JSON文字列）:
+
+```json
+{
+  "sql": "SELECT building AS 建屋, equipment_id AS 装置ID, chamber_id AS チャンバー, status AS ステータス FROM equipment_status_realtime WHERE status='DOWN' ORDER BY building, equipment_id",
+  "purpose": "現在DOWNしている装置の一覧"
+}
+```
+
+実行後、LLMへ戻す結果（`llm_content`。トークン節約のため先頭40行に要約）:
+
+```json
+{
+  "columns": ["建屋","装置ID","チャンバー","ステータス"],
+  "row_count": 2,
+  "truncated": false,
+  "rows": [["A棟","ETCH-A01","CH2","DOWN"], ["C棟","CVD-C01","CH1","DOWN"]],
+  "note": null
+}
+```
+
+UIにはこの結果がテーブルとして描画されます。
+
+#### ② plot_chart — 「日別のステータス内訳を積み上げ棒グラフで」
+
+`arguments`:
+
+```json
+{
+  "sql": "SELECT snapshot_date AS 日付, status AS ステータス, COUNT(*) AS 件数 FROM equipment_status_daily GROUP BY snapshot_date, status ORDER BY snapshot_date",
+  "chart_type": "bar",
+  "x": "日付", "y": "件数", "color": "ステータス",
+  "barmode": "stack",
+  "title": "日別ステータス内訳",
+  "purpose": "ステータス構成の推移を可視化"
+}
+```
+
+戻り値（要約。実データはUI側で保持してグラフ描画）:
+
+```json
+{"status": "chart_rendered", "chart_type": "bar", "columns": ["日付","ステータス","件数"], "row_count": 84}
+```
+
+`chart_type` は `line / bar / area / pie / scatter`、棒は `barmode="stack"` で積み上げになります。
+
+#### ③ plot_dual_axis — 「日別のDOWN件数(棒)と稼働率(折れ線)を2軸で」
+
+`arguments`:
+
+```json
+{
+  "sql": "SELECT snapshot_date AS 日付, SUM(CASE WHEN status='DOWN' THEN 1 ELSE 0 END) AS DOWN件数, ROUND(100.0*SUM(CASE WHEN status='RUN' THEN 1 ELSE 0 END)/COUNT(*),1) AS 稼働率 FROM equipment_status_daily GROUP BY snapshot_date ORDER BY snapshot_date",
+  "x": "日付",
+  "bar_y": ["DOWN件数"],
+  "line_y": ["稼働率"],
+  "left_title": "件数", "right_title": "稼働率(%)",
+  "title": "DOWN件数と稼働率の推移"
+}
+```
+
+`bar_y`（左軸の棒）と `line_y`（右軸の折れ線）には列名を複数渡せます。
+
+#### ④ get_schema — 引数なし
+
+```json
+{}
+```
+
+`equipment_status_realtime` / `equipment_status_daily` の列、建屋・ステータスの種類、データの日付範囲などをテキストで返します。
+（このスキーマ情報は system prompt にも埋め込んであるため、多くの場合 LLM はこのツールを呼ばずに正しいSQLを書けます。）
+
+### 1往復の生データ例（API視点）
+
+「現在DOWNしている装置を一覧で出して」での messages の遷移:
+
+**① 1回目のリクエスト**
+```json
+{
+  "model": "gpt-4o-mini",
+  "tool_choice": "auto",
+  "tools": [ /* tools.TOOLS の4関数定義 */ ],
+  "messages": [
+    {"role": "system", "content": "あなたは…(スキーマ入りの指示)…"},
+    {"role": "user",   "content": "現在DOWNしている装置を一覧で出して"}
+  ]
+}
+```
+
+**② 1回目のレスポンス（ツールを呼ぶと判断）**
+```json
+{
+  "role": "assistant",
+  "content": null,
+  "tool_calls": [{
+    "id": "call_abc123",
+    "type": "function",
+    "function": {
+      "name": "run_sql_query",
+      "arguments": "{\"sql\":\"SELECT … WHERE status='DOWN' …\",\"purpose\":\"…\"}"
+    }
+  }]
+}
+```
+
+**③ アプリが実行 → tool メッセージを追加して2回目を送信**
+```json
+"messages": [
+  {"role": "system",    "content": "…"},
+  {"role": "user",      "content": "現在DOWNしている装置を一覧で出して"},
+  {"role": "assistant", "content": null, "tool_calls": [ /* 上と同じ */ ]},
+  {"role": "tool", "tool_call_id": "call_abc123",
+   "content": "{\"columns\":[\"建屋\",…],\"row_count\":2,\"rows\":[…]}"}
+]
+```
+
+**④ 2回目のレスポンス（最終回答）**
+```json
+{"role": "assistant",
+ "content": "現在DOWNしている装置は2台です。A棟 ETCH-A01(CH2) と C棟 CVD-C01(CH1) です。…"}
+```
+
+`tool_call_id` で「どのツール呼び出しに対する結果か」を対応付けます。
+assistant(tool_calls) と tool(結果) は必ずペアで messages に積みます（`app._execute_calls`）。
+
+### 新しいToolを足すには
+
+1. [tools.py](tools.py) の `TOOLS` に JSON Schema を1つ追加
+2. 実処理 `_xxx(args) -> {"ok", "llm_content", "render"}` を実装
+3. `_HANDLERS` に `"ツール名": 関数` を登録
+4. UI描画が要るなら [app.py](app.py) の `_render_item` に対応する `kind` を追加
+
 ## API設定（重要）
 
 公式 OpenAI を使う場合は `base_url` を `https://api.openai.com/v1` にします。
