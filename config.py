@@ -1,4 +1,5 @@
 """アプリ全体の設定値。環境変数(.env)から読み込む。"""
+import json
 import os
 from pathlib import Path
 
@@ -53,8 +54,12 @@ STATUS_LABELS = {
     "ENG": "エンジニアリング",
 }
 
-# CSVヘッダ(日本語)→ 内部カラム名。英語ヘッダもフォールバックで許容。
-CSV_HEADER_MAP = {
+# 内部カラム名(DB側の列名)。CSVヘッダはこの5種へ変換できれば取込可能。
+REQUIRED_COLUMNS = ["updated_at", "building", "equipment_id", "chamber_id", "status"]
+
+# CSVヘッダ → 内部カラム名 の既定対応。
+# 仕様の日本語ヘッダと、英語の内部列名をそのまま許容する。
+_DEFAULT_CSV_HEADER_MAP = {
     "更新日時": "updated_at",
     "建屋": "building",
     "装置ID": "equipment_id",
@@ -66,7 +71,39 @@ CSV_HEADER_MAP = {
     "chamber_id": "chamber_id",
     "status": "status",
 }
-REQUIRED_COLUMNS = ["updated_at", "building", "equipment_id", "chamber_id", "status"]
+
+# 本番CSVのヘッダ名が既定と違う場合に、後から(コードを触らず)追加できる上書き設定。
+#   方法1: JSONファイル   … 既定 csv_mapping.json (環境変数 CSV_HEADER_MAP_FILE でパス変更可)
+#   方法2: 環境変数(.env) … CSV_HEADER_MAP_JSON にインラインJSON (ファイルより優先)
+# いずれも {"CSVのヘッダ名": "内部列名"} 形式。内部列名は REQUIRED_COLUMNS の5種。
+CSV_HEADER_MAP_FILE = Path(os.getenv("CSV_HEADER_MAP_FILE", str(BASE_DIR / "csv_mapping.json")))
+
+
+def _load_header_overrides() -> dict:
+    overrides: dict[str, str] = {}
+    if CSV_HEADER_MAP_FILE.exists():
+        try:
+            data = json.loads(CSV_HEADER_MAP_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                overrides.update({str(k).strip(): str(v).strip() for k, v in data.items()})
+        except Exception as e:
+            print(f"[config] CSVヘッダ設定ファイルを読めませんでした: {CSV_HEADER_MAP_FILE} ({e})")
+    env_json = os.getenv("CSV_HEADER_MAP_JSON", "").strip()
+    if env_json:
+        try:
+            data = json.loads(env_json)
+            if isinstance(data, dict):
+                overrides.update({str(k).strip(): str(v).strip() for k, v in data.items()})
+        except Exception as e:
+            print(f"[config] CSV_HEADER_MAP_JSON を解析できませんでした: {e}")
+    bad = {k: v for k, v in overrides.items() if v not in REQUIRED_COLUMNS}
+    if bad:
+        print(f"[config] 注意: 内部列名でない上書き値があります {bad} / 有効値: {REQUIRED_COLUMNS}")
+    return overrides
+
+
+# 既定 + 上書き(上書きが優先)。プロセス起動時に1回構築される。
+CSV_HEADER_MAP = {**_DEFAULT_CSV_HEADER_MAP, **_load_header_overrides()}
 
 # 起動時にデータ用フォルダを用意
 DATA_DIR.mkdir(parents=True, exist_ok=True)

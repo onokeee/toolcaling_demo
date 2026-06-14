@@ -1,0 +1,7 @@
+{
+  "装置番号": "equipment_id",
+  "号機": "equipment_id",
+  "更新時刻": "updated_at",
+  "ライン": "building",
+  "状態": "status"
+}

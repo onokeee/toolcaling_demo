@@ -374,6 +374,35 @@ OpenAI SDK が `base_url` の末尾に自動で `/chat/completions` を付与す
 > python -c "import ingest; ingest.ingest_latest_from_shared(); ingest.take_daily_snapshot()"
 > ```
 
+### CSVヘッダ名が既定と異なる場合（後から設定）
+
+CSVの1行目（列名）は **DBの列名そのものに一致している必要はなく**、対応表で内部列名へ変換します。
+既定では `更新日時 / 建屋 / 装置ID / チャンバーID / ステータス`（および英語の内部列名）を認識します。
+本番CSVのヘッダがこれと違っても、**コードを変えずに対応表で吸収**できます。
+変換先(値)は内部列名 `updated_at / building / equipment_id / chamber_id / status` のいずれか。
+
+**方法1: `csv_mapping.json` を置く**（推奨）
+```powershell
+copy csv_mapping.example.json csv_mapping.json
+```
+```json
+{
+  "装置番号": "equipment_id",
+  "更新時刻": "updated_at"
+}
+```
+
+**方法2: `.env` にインラインJSON**（ファイルより優先）
+```
+CSV_HEADER_MAP_JSON={"装置番号":"equipment_id","更新時刻":"updated_at"}
+```
+
+- キー = 本番CSVのヘッダ名、値 = 内部列名。前後の空白は無視（途中の空白・表記ゆれ・大文字小文字は別物）。
+- 既定マッピングに**追記**される形なので、**名前が違う列だけ**書けばOK（5列すべて書く必要はなし）。
+- 列の順序・余分な列は問わない（必要な5列が揃えばよい）。
+- 設定の反映には **プロセスの再起動**（`streamlit run` / `scheduler.py`）が必要。
+- 既定パスは `csv_mapping.json`。`CSV_HEADER_MAP_FILE` で別パスを指定可。
+
 ## 安全設計(SELECTのみ実行)
 
 `db.run_select()` は次の多層防御でSELECT以外を拒否します:

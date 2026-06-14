@@ -2,6 +2,9 @@
 .env
 .streamlit/secrets.toml
 
+# 環境固有のCSVヘッダ対応表（雛形 csv_mapping.example.json のみコミット）
+csv_mapping.json
+
 # Python キャッシュ
 __pycache__/
 *.pyc
